@@ -3,7 +3,7 @@ import pandas as pd
 import google.generativeai as genai
 import json
 import plotly.express as px
-
+import re
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="AI Tematik Analiz Aracı", layout="wide")
 
@@ -103,11 +103,19 @@ if uploaded_file and api_key:
                 {json.dumps(data_input, ensure_ascii=False)}
                 """
 
-                try:
+try:
                     response = model.generate_content(prompt)
                     
-                    # JSON Temizliği (Markdown taglerini kaldır)
-                    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+                    # --- GÜÇLENDİRİLMİŞ TEMİZLİK KODU (REGEX) ---
+                    # Bu kod, yapay zeka ne kadar geveze olursa olsun 
+                    # metnin içinden sadece { ile başlayıp } ile biten JSON kısmını cımbızla çeker.
+                    match = re.search(r'\{.*\}', response.text, re.DOTALL)
+                    
+                    if match:
+                        cleaned_text = match.group(0)
+                    else:
+                        # Eğer regex bulamazsa manuel temizliği dene
+                        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
                     
                     try:
                         result = json.loads(cleaned_text)
@@ -161,9 +169,8 @@ if uploaded_file and api_key:
                                     st.caption(f"— Bölüm: {alinti['major']}")
 
                     except json.JSONDecodeError:
-                        st.error("AI yanıtı uygun JSON formatında değildi. Lütfen tekrar deneyin.")
-                        with st.expander("Ham AI Yanıtını Gör"):
-                            st.text(cleaned_text)
+                        st.error("AI yanıtı hala uygun formatta değil. Ham veri aşağıdadır:")
+                        st.code(cleaned_text, language='json') # Hata olursa kod bloğu içinde göster
 
                 except Exception as e:
                     st.error(f"API Hatası: {e}")
@@ -178,6 +185,7 @@ elif not api_key:
 
 elif not uploaded_file:
     st.info("Lütfen analiz edilecek CSV dosyasını yükleyin.")
+
 
 
 
