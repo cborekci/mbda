@@ -163,4 +163,3 @@ if uploaded_file and api_key:
 
 elif not api_key:
     st.info("Lütfen API anahtarınızı girin.")
-
