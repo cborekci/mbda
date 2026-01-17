@@ -56,7 +56,7 @@ if uploaded_file and api_key:
         # --- 4. ANALİZ İŞLEMİ ---
         if st.button("🚀 Analizi Başlat"):
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel('gemini-2.5-flash')
 
             with st.spinner('Yapay zeka verileri okuyor, kodluyor ve analiz ediyor...'):
                 
@@ -178,5 +178,6 @@ elif not api_key:
 
 elif not uploaded_file:
     st.info("Lütfen analiz edilecek CSV dosyasını yükleyin.")
+
 
 
