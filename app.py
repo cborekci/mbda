@@ -53,7 +53,7 @@ if uploaded_file and api_key:
         if st.button("🚀 Analizi Başlat"):
             genai.configure(api_key=api_key)
             # Eğer 'gemini-1.5-flash' hata verirse 'gemini-pro' kullanabilirsiniz.
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
 
             with st.spinner('Yapay zeka verileri okuyor, kodluyor ve analiz ediyor...'):
                 
@@ -163,3 +163,4 @@ if uploaded_file and api_key:
 
 elif not api_key:
     st.info("Lütfen API anahtarınızı girin.")
+
