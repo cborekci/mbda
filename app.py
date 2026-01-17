@@ -10,8 +10,8 @@ st.set_page_config(page_title="AI Tematik Analiz Aracı", layout="wide")
 
 st.title("📊 AI Destekli Tematik Veri Analizi")
 st.markdown("""
-Bu araç, CSV dosyanızdaki verileri analiz eder, temaları ve alt temaları belirler, 
-doğrudan alıntılar yapar ve 'Major' (Bölüm) kırılımına göre görselleştirir.
+Bu araç, nitel verilerinizi analiz eder. **Genel Analiz** sekmesinde tüm veri setinin özetini, 
+**Bölüm Bazlı Analiz** sekmesinde ise seçtiğiniz bölüme özel detayları görebilirsiniz.
 """)
 
 # --- 1. API ANAHTARI YÖNETİMİ ---
@@ -29,7 +29,7 @@ with st.sidebar:
         "CSV Ayırıcı (Separator)", 
         options=[";", ",", "\t"], 
         index=0, 
-        help="Dosyanız Excel çıktısıysa genelde ';' (noktalı virgül) kullanılır."
+        help="Excel çıktıları için genelde ';' kullanılır."
     )
     uploaded_file = st.file_uploader("CSV Dosyasını Yükle", type=["csv"])
 
@@ -52,13 +52,15 @@ if uploaded_file and api_key:
         # --- 4. ANALİZ İŞLEMİ ---
         if st.button("🚀 Analizi Başlat"):
             genai.configure(api_key=api_key)
-            # Eğer 'gemini-1.5-flash' hata verirse 'gemini-pro' kullanabilirsiniz.
             model = genai.GenerativeModel('gemini-2.5-flash')
 
-            with st.spinner('Yapay zeka verileri okuyor, kodluyor ve analiz ediyor...'):
+            with st.spinner('Yapay zeka verileri okuyor, temaları kodluyor ve analiz ediyor...'):
                 
                 # Veri Hazırlığı
                 data_input = []
+                # Veri setindeki tüm benzersiz bölümleri alalım
+                unique_majors = df[major_column].unique().tolist()
+                
                 for index, row in df.iterrows():
                     data_input.append({
                         "id": index,
@@ -66,28 +68,30 @@ if uploaded_file and api_key:
                         "text": str(row[text_column])
                     })
                 
-                # Prompt
+                # --- GÜNCELLENMİŞ PROMPT ---
                 prompt = f"""
                 Sen uzman bir nitel veri analistisin. Aşağıdaki veri setini analiz et.
 
                 GÖREVLER:
-                1. Katılımcı görüşlerinden ana temaları ve alt temaları belirle.
-                2. Her tema için çarpıcı "doğrudan alıntılar" seç ve alıntıyı yapanın Major'ını belirt.
-                3. Hangi temanın hangi "Major" (bölüm) tarafından ne kadar zikredildiğini say.
+                1. Bütünsel Analiz: Katılımcı görüşlerinden ana temaları belirle.
+                2. Detaylandırma: Her ana tema için 2-4 adet açıklayıcı "alt tema" belirle.
+                3. Alıntılama: Her tema için çarpıcı "doğrudan alıntılar" seç ve alıntıyı yapanın Major'ını (Bölümünü) mutlaka belirt.
+                4. Frekans: Hangi temanın hangi "Major" (bölüm) tarafından ne kadar zikredildiğini say.
 
                 ÇIKTI FORMATI (SADECE JSON):
                 Cevabın kesinlikle ve sadece aşağıdaki JSON formatında olmalı. Markdown kullanma.
                 
                 {{
-                    "analiz_ozeti": "Genel değerlendirme paragrafı...",
+                    "analiz_ozeti": "Veri setinin genelindeki eğilimleri anlatan 1 paragraf özet.",
                     "temalar": [
                         {{
-                            "tema_adi": "Tema Başlığı",
-                            "toplam_frekans": 15,
-                            "alt_temalar": ["Alt 1", "Alt 2"],
-                            "major_dagilimi": {{"Bölüm A": 10, "Bölüm B": 5}},
+                            "tema_adi": "Tema Başlığı (Örn: Müfredat Yetersizliği)",
+                            "toplam_frekans": 25,
+                            "alt_temalar": ["Teorik ders yoğunluğu", "Pratik eksikliği", "Güncel olmayan içerik"],
+                            "major_dagilimi": {{"Bilgisayar Müh": 15, "Mimarlık": 10}},
                             "ornek_alintilar": [
-                                {{"alinti": "Örnek cümle...", "major": "Bölüm A"}}
+                                {{"alinti": "Dersler çok teorik...", "major": "Bilgisayar Müh"}},
+                                {{"alinti": "Atölye saatleri az...", "major": "Mimarlık"}}
                             ]
                         }}
                     ]
@@ -101,27 +105,25 @@ if uploaded_file and api_key:
                     # API ÇAĞRISI
                     response = model.generate_content(prompt)
                     
-                    # --- REGEX İLE TEMİZLİK (Hata Çözümü) ---
-                    # Yanıtın içinden sadece { ile başlayıp } ile biten JSON kısmını alır.
+                    # Regex ile temizlik
                     match = re.search(r'\{.*\}', response.text, re.DOTALL)
-                    
-                    if match:
-                        cleaned_text = match.group(0)
-                    else:
-                        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+                    cleaned_text = match.group(0) if match else response.text.replace("```json", "").replace("```", "").strip()
                     
                     # JSON PARSE
-                    try:
-                        result = json.loads(cleaned_text)
-                        
-                        # --- SONUÇLARI GÖSTER ---
-                        st.success("Analiz Tamamlandı!")
-                        
-                        # Özet
+                    result = json.loads(cleaned_text)
+                    st.success("Analiz Tamamlandı!")
+
+                    # --- YENİ ARAYÜZ YAPISI: SEKMELER (TABS) ---
+                    tab1, tab2 = st.tabs(["📊 Genel Analiz", "🎓 Bölüm (Major) Kırılımı"])
+
+                    # --- SEKME 1: GENEL ANALİZ ---
+                    with tab1:
                         st.subheader("📝 Yönetici Özeti")
                         st.info(result.get("analiz_ozeti", "Özet yok"))
                         
-                        # Grafik
+                        st.divider()
+                        
+                        # Grafik Verisi Hazırlama
                         temalar = result.get("temalar", [])
                         chart_data = []
                         for t in temalar:
@@ -132,34 +134,90 @@ if uploaded_file and api_key:
                                     "Frekans": count
                                 })
                         
+                        # 1. İSTEK: YIĞILIMLI ÇUBUK GRAFİĞİ (Stacked Bar Chart)
                         if chart_data:
-                            st.write("---")
-                            st.subheader("📊 Temaların Bölümlere Göre Dağılımı")
+                            st.subheader("📈 Temaların Bölümlere Göre Yığılımlı Dağılımı")
                             df_chart = pd.DataFrame(chart_data)
-                            fig = px.bar(df_chart, x="Tema", y="Frekans", color="Bölüm", barmode="group", text_auto=True)
+                            fig = px.bar(
+                                df_chart, 
+                                x="Tema", 
+                                y="Frekans", 
+                                color="Bölüm", 
+                                title="Tema Frekansları (Bölüm Kırılımlı)",
+                                text_auto=True
+                            )
+                            # Stacked (Yığılımlı) olması için layout güncellemesi
+                            fig.update_layout(barmode='stack', xaxis_tickangle=-45)
                             st.plotly_chart(fig, use_container_width=True)
 
-                        # Detaylar
-                        st.write("---")
-                        st.subheader("🔍 Detaylar ve Alıntılar")
+                        st.divider()
+                        st.subheader("🧩 Temalar ve Alt Temalar")
+                        
+                        # 2. İSTEK: ALT TEMALAR VE GENEL GÖRÜNÜM
                         for tema in temalar:
-                            with st.expander(f"📌 {tema['tema_adi']} ({tema['toplam_frekans']})"):
-                                st.markdown(f"**Alt Temalar:** {', '.join(tema.get('alt_temalar', []))}")
-                                st.markdown("#### 🗣️ Alıntılar")
+                            with st.expander(f"📌 {tema['tema_adi']} (Toplam: {tema['toplam_frekans']})"):
+                                # Alt temaları madde işaretli liste olarak gösterme
+                                st.markdown("**Alt Temalar:**")
+                                for sub in tema.get('alt_temalar', []):
+                                    st.markdown(f"- {sub}")
+                                
+                                st.markdown("---")
+                                st.markdown("**Örnek Alıntılar:**")
                                 for alinti in tema.get('ornek_alintilar', []):
                                     st.markdown(f"> *\"{alinti['alinti']}\"*")
                                     st.caption(f"— {alinti['major']}")
 
-                    except json.JSONDecodeError:
-                        st.error("JSON format hatası. Ham yanıt:")
-                        st.code(cleaned_text)
+                    # --- SEKME 2: BÖLÜM (MAJOR) BAZLI ANALİZ ---
+                    with tab2:
+                        st.subheader("🔍 Bölüm Bazlı Detaylandırma")
+                        
+                        # Bölüm Seçim Kutusu
+                        # JSON'dan gelen verilerdeki tüm bölümleri toplayalım
+                        available_majors = set()
+                        for t in temalar:
+                            available_majors.update(t.get("major_dagilimi", {}).keys())
+                        
+                        selected_major = st.selectbox("İncelemek istediğiniz Bölümü (Major) Seçin:", list(available_majors))
 
+                        if selected_major:
+                            st.markdown(f"### 🎓 {selected_major} Bölümü İçin Bulgular")
+                            
+                            major_has_data = False
+                            for tema in temalar:
+                                # Bu tema bu bölümde hiç geçmiş mi?
+                                major_count = tema.get("major_dagilimi", {}).get(selected_major, 0)
+                                
+                                if major_count > 0:
+                                    major_has_data = True
+                                    # Karta benzer görünüm
+                                    with st.container():
+                                        st.markdown(f"#### {tema['tema_adi']}")
+                                        st.write(f"Bu bölümden katılım sıklığı: **{major_count}**")
+                                        
+                                        # Sadece bu bölüme ait alıntıları filtrele
+                                        major_quotes = [q['alinti'] for q in tema.get('ornek_alintilar', []) if q.get('major') == selected_major]
+                                        
+                                        if major_quotes:
+                                            st.markdown("**Bu bölümden gelen ifadeler:**")
+                                            for q in major_quotes:
+                                                st.info(f"🗣️ {q}")
+                                        else:
+                                            st.markdown("*Bu tema için bu bölümden doğrudan alıntı seçilmemiş.*")
+                                        
+                                        st.divider()
+                            
+                            if not major_has_data:
+                                st.warning(f"{selected_major} bölümü için belirgin bir tema verisi bulunamadı.")
+
+                except json.JSONDecodeError:
+                    st.error("AI yanıtı JSON formatında değil. Ham veri:")
+                    st.code(cleaned_text)
                 except Exception as e:
-                    st.error(f"API Bağlantı Hatası: {e}")
+                    st.error(f"İşlem Hatası: {e}")
 
     except Exception as e:
-        st.error("Dosya okunurken hata oluştu. Ayırıcıyı değiştirmeyi deneyin.")
+        st.error("Dosya yüklenirken hata oluştu. Lütfen 'Ayırıcı'yı değiştirmeyi deneyin.")
         st.error(str(e))
 
 elif not api_key:
-    st.info("Lütfen API anahtarınızı girin.")
+    st.warning("Lütfen API anahtarınızı girin.")
