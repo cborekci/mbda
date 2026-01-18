@@ -81,7 +81,7 @@ if uploaded_file and api_key:
         # ANALİZ BUTONU
         if st.button("🚀 Start AI Analysis", type="primary"):
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
 
             with st.spinner('InsightAI is processing data, counting frequencies, and extracting quotes...'):
                 
@@ -251,3 +251,4 @@ if uploaded_file and api_key:
 elif not api_key:
     # Boş durum (Başlangıç ekranı)
     st.info("👋 Please enter your API Key in the sidebar to start.")
+
