@@ -44,23 +44,17 @@ with file_container:
 if uploaded_file and api_key:
     try:
         # CSV OKUMA
-        # Header varsa kullanır, yoksa da ilk satırı header sanabilir ama biz index ile erişeceğiz.
         try:
             df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
         except:
             df = pd.read_csv(uploaded_file, sep=";", engine='python', on_bad_lines='skip')
 
-        # --- 3. SÜTUN SABİTLEME (MANUEL MAPPING) ---
+        # --- 3. SÜTUN SABİTLEME ---
         if len(df.columns) < 3:
             st.error("❌ Error: The file must have at least 3 columns (ID, Major, Text).")
             st.stop()
         
-        # Sütun isimleri ne olursa olsun:
-        # 0. index -> ID
-        # 1. index -> Major (Group)
-        # 2. index -> Text
-        
-        # Veriyi temiz bir dataframe'e çekelim
+        # Veriyi temizle
         df_clean = pd.DataFrame({
             "ID": df.iloc[:, 0].astype(str),
             "Group": df.iloc[:, 1].astype(str),
@@ -70,18 +64,26 @@ if uploaded_file and api_key:
         st.info(f"✅ **File Loaded:** Processing **{len(df_clean)}** rows. Analyzing text from column 3, grouped by column 2.")
         
         # ANALİZ BUTONU
-        if st.button("🚀 Start AI Analysis", type="primary"):
+        if st.button("🚀 Start AI Analysis (High Precision)", type="primary"):
             genai.configure(api_key=api_key)
             
-            # --- ÖNEMLİ DÜZELTME: JSON MODE ---
-            # response_mime_type="application/json" komutu modelin sadece geçerli JSON üretmesini zorlar.
-            # Bu, "Expecting ',' delimiter" hatasını çözer.
+            # --- KRİTİK AYAR: Temperature 0.0 ---
+            # Temperature 0.0 = Maksimum tutarlılık, minimum yaratıcılık.
+            # Her çalıştırmada aynı sonucu vermesini sağlar.
+            generation_config = {
+                "temperature": 0.0,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 8192,
+                "response_mime_type": "application/json",
+            }
+
             model = genai.GenerativeModel(
-                'gemini-2.5-flash',
-                generation_config={"response_mime_type": "application/json"}
+                model_name="gemini-1.5-flash",
+                generation_config=generation_config
             )
 
-            with st.spinner('InsightAI is analyzing themes, sub-themes, and frequencies...'):
+            with st.spinner('InsightAI is analyzing themes with high precision...'):
                 
                 # VERİYİ HAZIRLA
                 data_input = []
@@ -97,7 +99,9 @@ if uploaded_file and api_key:
                 You are InsightAI, an expert qualitative data analyst. 
                 Analyze the following dataset provided in JSON format.
 
-                **CRITICAL RULE:** ALL OUTPUT MUST BE IN ENGLISH.
+                **CRITICAL RULES:** 1. ALL OUTPUT MUST BE IN ENGLISH.
+                2. BE STRICT AND OBJECTIVE. Do not hallucinate or invent information.
+                3. Base your analysis ONLY on the provided text.
 
                 TASKS:
                 1. **General Overview:** Write an executive summary paragraph (approx 100 words).
@@ -135,10 +139,8 @@ if uploaded_file and api_key:
                     # API ÇAĞRISI
                     response = model.generate_content(prompt)
                     
-                    # TEMİZLİK (JSON Mode kullandığımız için regex'e gerek kalmayabilir ama güvenlik için tutuyoruz)
-                    # Model doğrudan JSON döndüreceği için markdown tagleri temizlemek yeterli.
+                    # TEMİZLİK
                     cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-                    
                     result = json.loads(cleaned_text)
                     
                     st.success("Analysis Complete!")
@@ -150,12 +152,10 @@ if uploaded_file and api_key:
                     # TAB 1: GENEL BAKIŞ
                     # ==================================================
                     with tab_overview:
-                        # 1. ÖZET
                         st.markdown("### 📝 Executive Summary")
                         st.info(result.get("overview", "No summary."))
                         st.divider()
 
-                        # 2. GRAFİK (YATAY STACKED)
                         st.markdown("### 📉 Dominant Themes Landscape")
                         themes = result.get("themes", [])
                         chart_data = []
@@ -174,7 +174,6 @@ if uploaded_file and api_key:
                             st.plotly_chart(fig, use_container_width=True)
                         st.divider()
 
-                        # 3. TEMA KARTLARI
                         st.markdown("### 🧩 Theme Analysis")
                         for t in themes:
                             with st.expander(f"📌 {t['name']} (Total: {t['total_count']})", expanded=True):
@@ -197,14 +196,11 @@ if uploaded_file and api_key:
                     # ==================================================
                     with tab_breakdown:
                         st.subheader("🔍 Full Breakdown by Field")
-                        
-                        # Tüm unique grupları bul
                         all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
                         
                         for group in all_groups:
                             with st.container():
                                 st.markdown(f"## 🎓 {group}")
-                                
                                 has_data = False
                                 for t in themes:
                                     count = t.get("group_distribution", {}).get(group, 0)
@@ -212,26 +208,21 @@ if uploaded_file and api_key:
                                         has_data = True
                                         st.markdown(f"**{t['name']}** (Frequency: {count})")
                                         
-                                        # Progress bar (Zero division hatasını önle)
                                         total = t.get('total_count', 1)
                                         if total == 0: total = 1
-                                        
                                         ratio = count / total
                                         st.progress(ratio)
                                         
-                                        # Alıntılar
                                         group_quotes = [q['text'] for q in t.get("quotes", []) if q.get("group") == group]
                                         if group_quotes:
                                             for gq in group_quotes:
                                                 st.info(f"🗣️ \"{gq}\"")
                                         else:
                                             st.caption("*No direct quotes selected for this specific theme/group.*")
-                                        
                                         st.markdown("---")
                                 
                                 if not has_data:
                                     st.warning(f"No significant themes detected for {group}.")
-                            
                             st.write("##") 
 
                 except Exception as e:
