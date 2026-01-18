@@ -49,27 +49,23 @@ if uploaded_file and api_key:
         except:
             df = pd.read_csv(uploaded_file, sep=";", engine='python', on_bad_lines='skip')
 
-        # --- 3. SÜTUN SABİTLEME ---
         if len(df.columns) < 3:
             st.error("❌ Error: The file must have at least 3 columns (ID, Major, Text).")
             st.stop()
         
-        # Veriyi temizle
+        # Sütunları string'e çevir
         df_clean = pd.DataFrame({
             "ID": df.iloc[:, 0].astype(str),
             "Group": df.iloc[:, 1].astype(str),
             "Text": df.iloc[:, 2].astype(str)
         })
 
-        st.info(f"✅ **File Loaded:** Processing **{len(df_clean)}** rows. Analyzing text from column 3, grouped by column 2.")
+        st.info(f"✅ **File Loaded:** Processing **{len(df_clean)}** rows.")
         
-        # ANALİZ BUTONU
         if st.button("🚀 Start AI Analysis (High Precision)", type="primary"):
             genai.configure(api_key=api_key)
             
-            # --- KRİTİK AYAR: Temperature 0.0 ---
-            # Temperature 0.0 = Maksimum tutarlılık, minimum yaratıcılık.
-            # Her çalıştırmada aynı sonucu vermesini sağlar.
+            # AYARLAR: JSON formatı zorunlu ve temperature 0
             generation_config = {
                 "temperature": 0.0,
                 "top_p": 0.95,
@@ -79,53 +75,57 @@ if uploaded_file and api_key:
             }
 
             model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-1.5-flash",
                 generation_config=generation_config
             )
 
-            with st.spinner('InsightAI is analyzing themes with high precision...'):
+            with st.spinner('Sanitizing data and analyzing themes...'):
                 
-                # VERİYİ HAZIRLA
+                # --- HATA ÇÖZÜMÜ: VERİ TEMİZLİĞİ ---
+                # Çift tırnaklar JSON yapısını bozar. Onları tek tırnağa çeviriyoruz.
+                # Ayrıca yeni satır karakterlerini de boşluğa çeviriyoruz.
                 data_input = []
                 for index, row in df_clean.iterrows():
+                    safe_text = row["Text"].replace('"', "'").replace("\n", " ").strip()
+                    safe_group = row["Group"].replace('"', "'").strip()
+                    
                     data_input.append({
                         "id": row["ID"],
-                        "group": row["Group"], 
-                        "text": row["Text"]
+                        "group": safe_group, 
+                        "text": safe_text
                     })
                 
-                # --- PROMPT ---
                 prompt = f"""
                 You are InsightAI, an expert qualitative data analyst. 
                 Analyze the following dataset provided in JSON format.
 
-                **CRITICAL RULES:** 1. ALL OUTPUT MUST BE IN ENGLISH.
-                2. BE STRICT AND OBJECTIVE. Do not hallucinate or invent information.
-                3. Base your analysis ONLY on the provided text.
+                **CRITICAL RULES:**
+                1. ALL OUTPUT MUST BE IN ENGLISH.
+                2. Return ONLY valid JSON.
+                3. Do not use markdown formatting (no ```json tags).
 
                 TASKS:
-                1. **General Overview:** Write an executive summary paragraph (approx 100 words).
-                2. **Thematic Coding:** Identify main themes from the comments.
-                3. **Sub-themes & Counts:** For each theme, identify sub-themes AND count exactly how many comments belong to each sub-theme.
-                4. **Quantification:** Count how many times each theme is mentioned by each "Group" (Major).
-                5. **Quotes:** Select impactful quotes for each theme, labeled by "Group".
+                1. **General Overview:** Executive summary (100 words).
+                2. **Thematic Coding:** Identify main themes.
+                3. **Sub-themes:** Identify sub-themes AND count frequencies.
+                4. **Quantification:** Count theme mentions by "Group".
+                5. **Quotes:** Select impactful quotes.
 
-                OUTPUT FORMAT (You must return a valid JSON object):
+                OUTPUT JSON STRUCTURE:
                 {{
-                    "overview": "Executive summary string...",
+                    "overview": "Summary text...",
                     "themes": [
                         {{
                             "id": 1,
-                            "name": "Main Theme Title",
-                            "definition": "Short definition of the theme.",
-                            "total_count": 50,
+                            "name": "Theme Name",
+                            "definition": "Description...",
+                            "total_count": 0,
                             "sub_themes": [
-                                {{"name": "Sub-theme A", "count": 30}},
-                                {{"name": "Sub-theme B", "count": 20}}
+                                {{"name": "Sub 1", "count": 0}}
                             ],
-                            "group_distribution": {{"Science": 30, "Math": 20}},
+                            "group_distribution": {{"Group A": 0, "Group B": 0}},
                             "quotes": [
-                                {{"text": "Sample quote...", "group": "Science"}}
+                                {{"text": "Quote...", "group": "Group A"}}
                             ]
                         }}
                     ]
@@ -136,21 +136,19 @@ if uploaded_file and api_key:
                 """
 
                 try:
-                    # API ÇAĞRISI
                     response = model.generate_content(prompt)
                     
-                    # TEMİZLİK
-                    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-                    result = json.loads(cleaned_text)
+                    # Temizlik (Bazen model hala markdown ekleyebiliyor)
+                    text_to_parse = response.text.replace("```json", "").replace("```", "").strip()
+                    
+                    result = json.loads(text_to_parse)
                     
                     st.success("Analysis Complete!")
                     
                     # --- SEKME YAPISI ---
                     tab_overview, tab_breakdown = st.tabs(["📊 General Overview", "🎓 Detailed Field Breakdown"])
 
-                    # ==================================================
-                    # TAB 1: GENEL BAKIŞ
-                    # ==================================================
+                    # TAB 1
                     with tab_overview:
                         st.markdown("### 📝 Executive Summary")
                         st.info(result.get("overview", "No summary."))
@@ -191,9 +189,7 @@ if uploaded_file and api_key:
                                     for q in t.get("quotes", []):
                                         st.caption(f"🗣️ \"{q['text']}\" — *{q['group']}*")
 
-                    # ==================================================
-                    # TAB 2: DETAYLI BÖLÜM ANALİZİ
-                    # ==================================================
+                    # TAB 2
                     with tab_breakdown:
                         st.subheader("🔍 Full Breakdown by Field")
                         all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
@@ -218,21 +214,24 @@ if uploaded_file and api_key:
                                             for gq in group_quotes:
                                                 st.info(f"🗣️ \"{gq}\"")
                                         else:
-                                            st.caption("*No direct quotes selected for this specific theme/group.*")
+                                            st.caption("*No direct quotes.*")
                                         st.markdown("---")
                                 
                                 if not has_data:
                                     st.warning(f"No significant themes detected for {group}.")
                             st.write("##") 
 
+                except json.JSONDecodeError as e:
+                    st.error("JSON Parsing Error. The AI generated malformed JSON.")
+                    st.error(f"Error details: {e}")
+                    st.markdown("**Raw AI Output for Debugging:**")
+                    st.code(text_to_parse)
                 except Exception as e:
-                    st.error(f"AI Processing Error: {e}")
-                    st.warning("If the error persists, check if your CSV file has strange characters or encoding issues.")
+                    st.error(f"Processing Error: {e}")
 
     except Exception as e:
-        st.error("Error reading file. Please upload a CSV with 3 columns.")
+        st.error("Error reading file.")
         st.error(str(e))
 
 elif not api_key:
     st.info("👋 Please enter your API Key in the sidebar to start.")
-
