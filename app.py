@@ -9,7 +9,6 @@ import re
 st.set_page_config(page_title="InsightAI - Thematic Analysis", layout="wide", page_icon="🟣")
 
 # --- STİL (CSS) ---
-# Kart görünümleri ve başlıklar için ufak dokunuşlar
 st.markdown("""
     <style>
     .block-container {padding-top: 2rem;}
@@ -17,7 +16,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 1. API ANAHTARI (SADECE BURASI SIDEBAR'DA KALDI) ---
+# --- 1. API ANAHTARI ---
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -29,102 +28,100 @@ else:
 # --- BAŞLIK ---
 st.title("🟣 InsightAI")
 st.markdown("### Automated Thematic Analysis & Field Segmentation")
-st.markdown("Upload your dataset below. The system will auto-detect the text and group columns.")
+st.markdown("""
+**Required CSV Format:**
+1. Column: **Participant ID** (e.g., O1, O2)
+2. Column: **Major/Field** (e.g., Science, Math)
+3. Column: **Opinion/Text** (The feedback to analyze)
+""")
 
-# --- 2. MERKEZİ DOSYA YÜKLEME (KONFİGÜRASYON YOK) ---
+# --- 2. DOSYA YÜKLEME ---
 file_container = st.container()
 with file_container:
-    uploaded_file = st.file_uploader("", type=["csv"], help="Upload a standard CSV file.")
+    uploaded_file = st.file_uploader("", type=["csv"], help="Upload your CSV file with the 3-column format.")
 
 # --- UYGULAMA MANTIĞI ---
 if uploaded_file and api_key:
     try:
-        # OTOMATİK AYIRICI TESPİTİ VE OKUMA
-        # Pandas'ın python motoru genelde ayırıcıyı tahmin edebilir ama biz standart okuyalım
-        # Eğer veri düzgün okunmazsa, kullanıcı dosyasını ; veya , standardına getirmeli.
+        # CSV OKUMA
+        # Header varsa kullanır, yoksa da ilk satırı header sanabilir ama biz index ile erişeceğiz.
         try:
             df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
         except:
             df = pd.read_csv(uploaded_file, sep=";", engine='python', on_bad_lines='skip')
 
-        # --- 3. OTOMATİK SÜTUN TESPİTİ (AUTO-DETECT) ---
-        # Mantık: Ortalama karakter sayısı en yüksek olan sütun "Metin"dir.
-        # Benzersiz değer sayısı daha az olan (kategorik) sütun "Major"dur.
-        
-        cols = df.columns
-        if len(cols) < 2:
-            st.error("Error: CSV must have at least 2 columns (Group and Text).")
+        # --- 3. SÜTUN SABİTLEME (MANUEL MAPPING) ---
+        if len(df.columns) < 3:
+            st.error("❌ Error: The file must have at least 3 columns (ID, Major, Text).")
             st.stop()
-            
-        # Basit sezgisel tespit
-        text_column = None
-        major_column = None
         
-        max_avg_len = 0
-        for col in cols:
-            # Sütun string tipindeyse ortalama uzunluğuna bak
-            if df[col].dtype == object or df[col].dtype == str:
-                avg_len = df[col].astype(str).str.len().mean()
-                if avg_len > max_avg_len:
-                    max_avg_len = avg_len
-                    text_column = col
+        # Sütun isimleri ne olursa olsun:
+        # 0. index -> ID
+        # 1. index -> Major (Group)
+        # 2. index -> Text
         
-        # Text column dışındaki ilk sütunu major kabul edelim (veya en az unique değere sahip olanı)
-        remaining_cols = [c for c in cols if c != text_column]
-        if remaining_cols:
-            major_column = remaining_cols[0] # Genelde ilk sütun ID veya Majordur.
-        else:
-            major_column = cols[0] # Fallback
+        # Veriyi temiz bir dataframe'e çekelim
+        df_clean = pd.DataFrame({
+            "ID": df.iloc[:, 0].astype(str),
+            "Group": df.iloc[:, 1].astype(str),
+            "Text": df.iloc[:, 2].astype(str)
+        })
 
-        st.info(f"✅ **Auto-Detected Structure:** Grouping by **'{major_column}'** | Analyzing Text from **'{text_column}'**")
+        st.info(f"✅ **File Loaded:** Processing **{len(df_clean)}** rows. Analyzing text from column 3, grouped by column 2.")
         
         # ANALİZ BUTONU
         if st.button("🚀 Start AI Analysis", type="primary"):
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            
+            # --- ÖNEMLİ DÜZELTME: JSON MODE ---
+            # response_mime_type="application/json" komutu modelin sadece geçerli JSON üretmesini zorlar.
+            # Bu, "Expecting ',' delimiter" hatasını çözer.
+            model = genai.GenerativeModel(
+                'gemini-2.5-flash',
+                generation_config={"response_mime_type": "application/json"}
+            )
 
-            with st.spinner('InsightAI is processing data, counting frequencies, and extracting quotes...'):
+            with st.spinner('InsightAI is analyzing themes, sub-themes, and frequencies...'):
                 
                 # VERİYİ HAZIRLA
                 data_input = []
-                # Token limitini korumak için max 1000 satır (opsiyonel, şu an hepsi)
-                for index, row in df.iterrows():
+                for index, row in df_clean.iterrows():
                     data_input.append({
-                        "id": index,
-                        "group": str(row[major_column]), 
-                        "text": str(row[text_column])
+                        "id": row["ID"],
+                        "group": row["Group"], 
+                        "text": row["Text"]
                     })
                 
-                # --- PROMPT GÜNCELLEMESİ (Sub-theme Counts) ---
+                # --- PROMPT ---
                 prompt = f"""
                 You are InsightAI, an expert qualitative data analyst. 
-                Analyze the following dataset. 
+                Analyze the following dataset provided in JSON format.
 
                 **CRITICAL RULE:** ALL OUTPUT MUST BE IN ENGLISH.
 
                 TASKS:
-                1. **General Overview:** Summary paragraph (approx 100 words).
-                2. **Thematic Coding:** Identify main themes.
-                3. **Sub-themes with Counts:** For each theme, identify sub-themes AND count how many comments fall into that sub-theme.
-                4. **Quantification:** Count theme mentions by "Group".
-                5. **Quotes:** Select impactful quotes per theme, labeled by "Group".
+                1. **General Overview:** Write an executive summary paragraph (approx 100 words).
+                2. **Thematic Coding:** Identify main themes from the comments.
+                3. **Sub-themes & Counts:** For each theme, identify sub-themes AND count exactly how many comments belong to each sub-theme.
+                4. **Quantification:** Count how many times each theme is mentioned by each "Group" (Major).
+                5. **Quotes:** Select impactful quotes for each theme, labeled by "Group".
 
-                OUTPUT FORMAT (STRICT JSON):
+                OUTPUT FORMAT (You must return a valid JSON object):
                 {{
                     "overview": "Executive summary string...",
                     "themes": [
                         {{
                             "id": 1,
                             "name": "Main Theme Title",
-                            "definition": "Short definition.",
+                            "definition": "Short definition of the theme.",
                             "total_count": 50,
                             "sub_themes": [
                                 {{"name": "Sub-theme A", "count": 30}},
                                 {{"name": "Sub-theme B", "count": 20}}
                             ],
-                            "group_distribution": {{"Group A": 30, "Group B": 20}},
+                            "group_distribution": {{"Science": 30, "Math": 20}},
                             "quotes": [
-                                {{"text": "Quote text...", "group": "Group A"}}
+                                {{"text": "Sample quote...", "group": "Science"}}
                             ]
                         }}
                     ]
@@ -138,9 +135,9 @@ if uploaded_file and api_key:
                     # API ÇAĞRISI
                     response = model.generate_content(prompt)
                     
-                    # TEMİZLİK
-                    match = re.search(r'\{.*\}', response.text, re.DOTALL)
-                    cleaned_text = match.group(0) if match else response.text.replace("```json", "").replace("```", "").strip()
+                    # TEMİZLİK (JSON Mode kullandığımız için regex'e gerek kalmayabilir ama güvenlik için tutuyoruz)
+                    # Model doğrudan JSON döndüreceği için markdown tagleri temizlemek yeterli.
+                    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
                     
                     result = json.loads(cleaned_text)
                     
@@ -177,7 +174,7 @@ if uploaded_file and api_key:
                             st.plotly_chart(fig, use_container_width=True)
                         st.divider()
 
-                        # 3. TEMA KARTLARI (SUB-THEME COUNTS İLE)
+                        # 3. TEMA KARTLARI
                         st.markdown("### 🧩 Theme Analysis")
                         for t in themes:
                             with st.expander(f"📌 {t['name']} (Total: {t['total_count']})", expanded=True):
@@ -185,31 +182,26 @@ if uploaded_file and api_key:
                                 c1, c2 = st.columns([1, 1])
                                 with c1:
                                     st.markdown("**Sub-Themes & Frequencies:**")
-                                    # Alt temaları ve sayılarını yazdır
                                     for sub in t.get("sub_themes", []):
-                                        # Eğer API string döndürdüyse (eski format koruması)
-                                        if isinstance(sub, str):
-                                            st.markdown(f"• {sub}")
+                                        if isinstance(sub, dict):
+                                             st.markdown(f"• **{sub.get('name', 'Unknown')}** ({sub.get('count', 0)})")
                                         else:
-                                            # Yeni format: Obje {name, count}
-                                            st.markdown(f"• **{sub['name']}** ({sub['count']} mentions)")
+                                            st.markdown(f"• {sub}")
                                 with c2:
                                     st.markdown("**Key Voices:**")
                                     for q in t.get("quotes", []):
                                         st.caption(f"🗣️ \"{q['text']}\" — *{q['group']}*")
 
                     # ==================================================
-                    # TAB 2: DETAYLI BÖLÜM ANALİZİ (DROP-DOWN YOK)
+                    # TAB 2: DETAYLI BÖLÜM ANALİZİ
                     # ==================================================
                     with tab_breakdown:
                         st.subheader("🔍 Full Breakdown by Field")
-                        st.markdown("Below is the detailed thematic distribution for every field found in the dataset.")
                         
                         # Tüm unique grupları bul
                         all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
                         
                         for group in all_groups:
-                            # Her bölüm için bir kapsayıcı
                             with st.container():
                                 st.markdown(f"## 🎓 {group}")
                                 
@@ -218,14 +210,16 @@ if uploaded_file and api_key:
                                     count = t.get("group_distribution", {}).get(group, 0)
                                     if count > 0:
                                         has_data = True
-                                        # Temayı ve o bölümdeki yoğunluğunu göster
                                         st.markdown(f"**{t['name']}** (Frequency: {count})")
                                         
-                                        # İlerleme çubuğu (O temanın toplamına göre bu bölümün payı)
-                                        ratio = count / t['total_count']
+                                        # Progress bar (Zero division hatasını önle)
+                                        total = t.get('total_count', 1)
+                                        if total == 0: total = 1
+                                        
+                                        ratio = count / total
                                         st.progress(ratio)
                                         
-                                        # Sadece bu gruba ait alıntıları çek
+                                        # Alıntılar
                                         group_quotes = [q['text'] for q in t.get("quotes", []) if q.get("group") == group]
                                         if group_quotes:
                                             for gq in group_quotes:
@@ -238,17 +232,15 @@ if uploaded_file and api_key:
                                 if not has_data:
                                     st.warning(f"No significant themes detected for {group}.")
                             
-                            # Gruplar arası büyük boşluk
                             st.write("##") 
 
                 except Exception as e:
                     st.error(f"AI Processing Error: {e}")
+                    st.warning("If the error persists, check if your CSV file has strange characters or encoding issues.")
 
     except Exception as e:
-        st.error("Error reading file. Please ensure it is a standard CSV/Excel export.")
+        st.error("Error reading file. Please upload a CSV with 3 columns.")
         st.error(str(e))
 
 elif not api_key:
-    # Boş durum (Başlangıç ekranı)
     st.info("👋 Please enter your API Key in the sidebar to start.")
-
