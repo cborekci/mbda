@@ -65,7 +65,7 @@ if uploaded_file and api_key:
         if st.button("🚀 Start AI Analysis", type="primary"):
             genai.configure(api_key=api_key)
             # Using 1.5 Flash for speed and large context
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
 
             with st.spinner('InsightAI is processing your data, identifying themes, and generating visualizations...'):
                 
@@ -244,3 +244,4 @@ if uploaded_file and api_key:
 
 elif not api_key:
     st.info("👋 Welcome to InsightAI. Please enter your API Key in the sidebar to begin.")
+
