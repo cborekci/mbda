@@ -30,9 +30,9 @@ st.title("🟣 InsightAI")
 st.markdown("### Automated Thematic Analysis & Field Segmentation")
 st.markdown("""
 **Required CSV Format:**
-1. Column: **Participant ID** (e.g., O1, O2)
-2. Column: **Major/Field** (e.g., Science, Math)
-3. Column: **Opinion/Text** (The feedback to analyze)
+1. Column: **Participant ID**
+2. Column: **Major/Field**
+3. Column: **Opinion/Text**
 """)
 
 # --- 2. DOSYA YÜKLEME ---
@@ -53,7 +53,7 @@ if uploaded_file and api_key:
             st.error("❌ Error: The file must have at least 3 columns (ID, Major, Text).")
             st.stop()
         
-        # Sütunları string'e çevir
+        # Sütunları string'e çevir ve temizle
         df_clean = pd.DataFrame({
             "ID": df.iloc[:, 0].astype(str),
             "Group": df.iloc[:, 1].astype(str),
@@ -65,12 +65,13 @@ if uploaded_file and api_key:
         if st.button("🚀 Start AI Analysis (High Precision)", type="primary"):
             genai.configure(api_key=api_key)
             
-            # AYARLAR: JSON formatı zorunlu ve temperature 0
+            # --- GÜNCELLEME 1: Token Limitini Artırdık ---
+            # max_output_tokens değerini 15.000'e çıkardık (Flash modeli bunu destekler).
             generation_config = {
                 "temperature": 0.0,
                 "top_p": 0.95,
                 "top_k": 40,
-                "max_output_tokens": 8192,
+                "max_output_tokens": 15000, 
                 "response_mime_type": "application/json",
             }
 
@@ -79,11 +80,9 @@ if uploaded_file and api_key:
                 generation_config=generation_config
             )
 
-            with st.spinner('Sanitizing data and analyzing themes...'):
+            with st.spinner('Sanitizing data and analyzing themes (This may take a moment)...'):
                 
-                # --- HATA ÇÖZÜMÜ: VERİ TEMİZLİĞİ ---
-                # Çift tırnaklar JSON yapısını bozar. Onları tek tırnağa çeviriyoruz.
-                # Ayrıca yeni satır karakterlerini de boşluğa çeviriyoruz.
+                # VERİ TEMİZLİĞİ (Tırnak İşaretleri Sorunu İçin)
                 data_input = []
                 for index, row in df_clean.iterrows():
                     safe_text = row["Text"].replace('"', "'").replace("\n", " ").strip()
@@ -95,6 +94,8 @@ if uploaded_file and api_key:
                         "text": safe_text
                     })
                 
+                # --- GÜNCELLEME 2: Prompt Sınırlamaları ---
+                # Çıktının kesilmemesi için "Top 5 sub-themes" ve "Max 2 quotes" sınırlarını ekledik.
                 prompt = f"""
                 You are InsightAI, an expert qualitative data analyst. 
                 Analyze the following dataset provided in JSON format.
@@ -102,14 +103,14 @@ if uploaded_file and api_key:
                 **CRITICAL RULES:**
                 1. ALL OUTPUT MUST BE IN ENGLISH.
                 2. Return ONLY valid JSON.
-                3. Do not use markdown formatting (no ```json tags).
+                3. Do not use markdown formatting.
 
                 TASKS:
-                1. **General Overview:** Executive summary (100 words).
-                2. **Thematic Coding:** Identify main themes.
-                3. **Sub-themes:** Identify sub-themes AND count frequencies.
+                1. **General Overview:** Executive summary (approx 100 words).
+                2. **Thematic Coding:** Identify main themes from the comments.
+                3. **Sub-themes:** Identify the **TOP 5** sub-themes for each main theme and count frequencies.
                 4. **Quantification:** Count theme mentions by "Group".
-                5. **Quotes:** Select impactful quotes.
+                5. **Quotes:** Select **MAXIMUM 2** impactful quotes per theme, labeled by "Group".
 
                 OUTPUT JSON STRUCTURE:
                 {{
@@ -138,7 +139,6 @@ if uploaded_file and api_key:
                 try:
                     response = model.generate_content(prompt)
                     
-                    # Temizlik (Bazen model hala markdown ekleyebiliyor)
                     text_to_parse = response.text.replace("```json", "").replace("```", "").strip()
                     
                     result = json.loads(text_to_parse)
@@ -148,7 +148,7 @@ if uploaded_file and api_key:
                     # --- SEKME YAPISI ---
                     tab_overview, tab_breakdown = st.tabs(["📊 General Overview", "🎓 Detailed Field Breakdown"])
 
-                    # TAB 1
+                    # TAB 1: Genel Bakış
                     with tab_overview:
                         st.markdown("### 📝 Executive Summary")
                         st.info(result.get("overview", "No summary."))
@@ -178,7 +178,7 @@ if uploaded_file and api_key:
                                 st.write(f"_{t.get('definition', '')}_")
                                 c1, c2 = st.columns([1, 1])
                                 with c1:
-                                    st.markdown("**Sub-Themes & Frequencies:**")
+                                    st.markdown("**Top Sub-Themes:**")
                                     for sub in t.get("sub_themes", []):
                                         if isinstance(sub, dict):
                                              st.markdown(f"• **{sub.get('name', 'Unknown')}** ({sub.get('count', 0)})")
@@ -189,7 +189,7 @@ if uploaded_file and api_key:
                                     for q in t.get("quotes", []):
                                         st.caption(f"🗣️ \"{q['text']}\" — *{q['group']}*")
 
-                    # TAB 2
+                    # TAB 2: Detaylı Analiz
                     with tab_breakdown:
                         st.subheader("🔍 Full Breakdown by Field")
                         all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
@@ -214,7 +214,7 @@ if uploaded_file and api_key:
                                             for gq in group_quotes:
                                                 st.info(f"🗣️ \"{gq}\"")
                                         else:
-                                            st.caption("*No direct quotes.*")
+                                            st.caption("*No direct quotes selected.*")
                                         st.markdown("---")
                                 
                                 if not has_data:
@@ -222,10 +222,10 @@ if uploaded_file and api_key:
                             st.write("##") 
 
                 except json.JSONDecodeError as e:
-                    st.error("JSON Parsing Error. The AI generated malformed JSON.")
-                    st.error(f"Error details: {e}")
-                    st.markdown("**Raw AI Output for Debugging:**")
-                    st.code(text_to_parse)
+                    st.error("JSON Parsing Error. The AI response was truncated or malformed.")
+                    st.error(f"Details: {e}")
+                    # Debug için kesik metni gösterme (Opsiyonel)
+                    # st.text(text_to_parse) 
                 except Exception as e:
                     st.error(f"Processing Error: {e}")
 
@@ -235,4 +235,3 @@ if uploaded_file and api_key:
 
 elif not api_key:
     st.info("👋 Please enter your API Key in the sidebar to start.")
-
