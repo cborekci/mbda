@@ -3,21 +3,20 @@ import pandas as pd
 import google.generativeai as genai
 import json
 import plotly.express as px
-import re
+import time
 
-# --- SAYFA YAPILANDIRMASI ---
-st.set_page_config(page_title="InsightAI - Thematic Analysis", layout="wide", page_icon="🟣")
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="InsightAI - Pro (Batch Processing)", layout="wide", page_icon="🟣")
 
-# --- CSS STİLİ ---
+# --- CSS ---
 st.markdown("""
     <style>
     .block-container {padding-top: 2rem;}
-    div[data-testid="stExpander"] div[role="button"] p {font-size: 1.1rem; font-weight: 600;}
-    .stAlert {margin-top: 1rem;}
+    .stProgress > div > div > div > div {background-color: #6c5ce7;}
     </style>
 """, unsafe_allow_html=True)
 
-# --- 1. API ANAHTARI YÖNETİMİ ---
+# --- 1. API GİRİŞİ ---
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -27,138 +26,155 @@ else:
         api_key = st.text_input("Gemini API Key", type="password")
 
 # --- BAŞLIK ---
-st.title("🟣 InsightAI")
-st.markdown("### Automated Thematic Analysis & Field Segmentation")
-st.markdown("""
-**Format Requirement:**
-1. Column: **ID**
-2. Column: **Major/Field**
-3. Column: **Text/Opinion**
-""")
+st.title("🟣 InsightAI Pro")
+st.markdown("### Large Scale Thematic Analysis (Batch Processing)")
+st.info("ℹ️ This version splits large datasets into chunks to avoid AI output limits.")
 
 # --- 2. DOSYA YÜKLEME ---
-file_container = st.container()
-with file_container:
-    uploaded_file = st.file_uploader("", type=["csv"], help="Upload standard CSV.")
+uploaded_file = st.file_uploader("Upload CSV (Unlimited Rows)", type=["csv"])
+
+# --- YARDIMCI FONKSİYONLAR ---
+def chunk_dataframe(df, chunk_size=300):
+    """Veriyi belirtilen satır sayısına göre parçalar."""
+    return [df[i:i + chunk_size] for i in range(0, df.shape[0], chunk_size)]
 
 # --- UYGULAMA MANTIĞI ---
 if uploaded_file and api_key:
     try:
-        # CSV OKUMA (Esnek Ayırıcı)
+        # CSV OKUMA
         try:
             df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
         except:
             df = pd.read_csv(uploaded_file, sep=";", engine='python', on_bad_lines='skip')
 
         if len(df.columns) < 3:
-            st.error("❌ Error: File needs at least 3 columns.")
+            st.error("❌ Error: File needs 3 columns (ID, Major, Text).")
             st.stop()
 
-        # TEMİZ VERİ ÇERÇEVESİ OLUŞTURMA
+        # VERİ TEMİZLEME
         df_clean = pd.DataFrame({
             "ID": df.iloc[:, 0].astype(str),
             "Group": df.iloc[:, 1].astype(str),
             "Text": df.iloc[:, 2].astype(str)
         })
 
-        # --- GÜNCELLEME 1: AKILLI ÖRNEKLEM (Sampling) ---
-        # Veri seti çok büyükse API yanıtı kesilir (Truncation Error). 
-        # Bu yüzden 750 satırdan fazlasını rastgele örnekliyoruz.
         total_rows = len(df_clean)
-        if total_rows > 750:
-            df_analyzed = df_clean.sample(n=750, random_state=42)
-            st.warning(f"⚠️ Dataset is large ({total_rows} rows). Analyzing a random sample of **750 rows** to ensure API stability.")
-        else:
-            df_analyzed = df_clean
-            st.info(f"✅ Processing all **{total_rows}** rows.")
+        # 400 satırlık parçalara böl (Flash modeli için güvenli aralık)
+        BATCH_SIZE = 400 
+        chunks = chunk_dataframe(df_clean, BATCH_SIZE)
+        
+        st.write(f"📊 **Dataset:** {total_rows} rows | **Batches:** {len(chunks)} chunks of ~{BATCH_SIZE} rows.")
 
-        if st.button("🚀 Start AI Analysis (High Precision)", type="primary"):
+        if st.button("🚀 Start Batch Analysis", type="primary"):
             genai.configure(api_key=api_key)
-            
-            # --- MODEL AYARLARI ---
-            generation_config = {
-                "temperature": 0.0,
-                "top_p": 0.95,
-                "max_output_tokens": 8192, # Output limit
-                "response_mime_type": "application/json",
-            }
-            
             model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash", 
-                generation_config=generation_config
+                'gemini-2.5-flash',
+                generation_config={"response_mime_type": "application/json", "temperature": 0.0}
             )
 
-            with st.spinner('Sanitizing data and generating insights...'):
-                
-                # JSON Input Hazırlığı (Temizlenmiş)
-                data_input = []
-                for index, row in df_analyzed.iterrows():
-                    # Tırnak işaretlerini temizle ki JSON bozulmasın
-                    safe_text = row["Text"].replace('"', "'").replace("\n", " ").strip()
-                    safe_group = row["Group"].replace('"', "'").strip()
-                    data_input.append({"group": safe_group, "text": safe_text})
-                
-                # --- GÜNCELLEME 2: PROMPT KISITLAMALARI ---
-                # "TOP 5 Themes" ve "Max 2 Quotes" diyerek çıktının boyutunu kontrol altına alıyoruz.
-                prompt = f"""
-                You are InsightAI, an expert data analyst. Analyze the provided dataset (JSON).
+            # --- AŞAMA 1: PARÇALI ANALİZ (MAP) ---
+            intermediate_results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-                **CRITICAL RULES:**
-                1. Output ONLY valid JSON. No markdown.
-                2. Language: ENGLISH ONLY.
-                3. **BE CONCISE.** Do not generate huge text blocks.
+            for i, chunk in enumerate(chunks):
+                status_text.markdown(f"⏳ **Processing Batch {i+1}/{len(chunks)}...**")
+                
+                # Veriyi hazırla
+                chunk_data = []
+                for _, row in chunk.iterrows():
+                    chunk_data.append({
+                        "group": row["Group"].replace('"', "'").strip(), 
+                        "text": row["Text"].replace('"', "'").replace("\n", " ").strip()
+                    })
+                
+                # Ara Prompt (Sadece temaları ve sayıları çıkar)
+                chunk_prompt = f"""
+                Analyze this PARTIAL dataset (Batch {i+1}).
+                Return valid JSON. English Only.
 
                 TASKS:
-                1. **Overview:** Executive summary (max 50 words).
-                2. **Themes:** Identify the **TOP 5** most dominant themes.
-                3. **Sub-themes:** For each theme, list top 3 sub-themes with counts.
-                4. **Distribution:** Count mentions per Group.
-                5. **Quotes:** Select **EXACTLY 2** representative quotes per theme (Total, not per group).
+                1. Identify main themes in this batch.
+                2. Count theme frequency per Group.
+                3. Select 1 best quote per theme.
 
                 OUTPUT FORMAT:
-                {{
-                    "overview": "Short summary...",
-                    "themes": [
-                        {{
-                            "name": "Theme Title",
-                            "definition": "Short definition",
-                            "total_count": 100,
-                            "sub_themes": [{{"name": "Sub A", "count": 10}}],
-                            "group_distribution": {{"Group A": 50, "Group B": 50}},
-                            "quotes": [
-                                {{"text": "Quote 1...", "group": "Group A"}},
-                                {{"text": "Quote 2...", "group": "Group B"}}
-                            ]
-                        }}
-                    ]
-                }}
+                [
+                    {{
+                        "theme": "Theme Name",
+                        "group_counts": {{"Math": 5, "Science": 3}},
+                        "quote": {{"text": "...", "group": "..."}}
+                    }}
+                ]
 
-                DATASET:
-                {json.dumps(data_input, ensure_ascii=False)}
+                DATA:
+                {json.dumps(chunk_data, ensure_ascii=False)}
                 """
-
+                
                 try:
-                    response = model.generate_content(prompt)
-                    
-                    # Yanıtı temizle
-                    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-                    
-                    # JSON Dönüşümü
-                    result = json.loads(cleaned_text)
-                    
-                    st.success("Analysis Complete!")
-                    
-                    # --- GÖRSELLEŞTİRME ---
-                    tab_overview, tab_breakdown = st.tabs(["📊 General Overview", "🎓 Field Breakdown"])
+                    response = model.generate_content(chunk_prompt)
+                    chunk_json = json.loads(response.text)
+                    intermediate_results.extend(chunk_json) # Sonuçları havuza at
+                except Exception as e:
+                    st.error(f"Error in Batch {i+1}: {e}")
+                
+                # İlerleme çubuğunu güncelle
+                progress_bar.progress((i + 1) / len(chunks))
 
+            status_text.success("✅ All batches processed. Merging results...")
+
+            # --- AŞAMA 2: BİRLEŞTİRME (REDUCE) ---
+            # Şimdi tüm ara sonuçları tek bir prompt ile birleştiriyoruz.
+            
+            final_prompt = f"""
+            You are an expert Data Analyst. I have analyzed a large dataset in batches. 
+            Below is the list of ALL intermediate findings merged together.
+            
+            YOUR JOB:
+            1. **Merge** similar themes (e.g., "Teacher Training" and "Educating Teachers" should be one).
+            2. **Sum** the counts for the merged themes accurately.
+            3. **Select** the best representative quotes from the list.
+            4. **Finalize** the top 5 dominant themes.
+
+            INPUT DATA (Intermediate Results):
+            {json.dumps(intermediate_results, ensure_ascii=False)}
+
+            FINAL OUTPUT FORMAT (Valid JSON, English):
+            {{
+                "overview": "Executive summary of the whole analysis...",
+                "themes": [
+                    {{
+                        "name": "Final Theme Title",
+                        "definition": "Description",
+                        "total_count": 0,
+                        "sub_themes": ["Sub 1", "Sub 2"], 
+                        "group_distribution": {{"Group A": 0, "Group B": 0}},
+                        "quotes": [
+                            {{"text": "Quote...", "group": "Group A"}}
+                        ]
+                    }}
+                ]
+            }}
+            """
+
+            with st.spinner('Synthesizing final report...'):
+                try:
+                    final_response = model.generate_content(final_prompt)
+                    final_result = json.loads(final_response.text)
+                    
+                    # --- SONUÇLARI GÖSTER (Eski kodla aynı yapı) ---
+                    st.divider()
+                    
+                    tab1, tab2 = st.tabs(["📊 General Overview", "🎓 Detailed Breakdown"])
+                    
                     # TAB 1
-                    with tab_overview:
+                    with tab1:
                         st.markdown("### 📝 Executive Summary")
-                        st.info(result.get("overview", "No summary."))
-                        st.divider()
-
-                        st.markdown("### 📉 Theme Landscape")
-                        themes = result.get("themes", [])
+                        st.info(final_result.get("overview"))
+                        
+                        themes = final_result.get("themes", [])
+                        
+                        # Grafik
                         chart_data = []
                         for t in themes:
                             for grp, count in t.get("group_distribution", {}).items():
@@ -166,65 +182,40 @@ if uploaded_file and api_key:
                         
                         if chart_data:
                             df_chart = pd.DataFrame(chart_data)
-                            fig = px.bar(
-                                df_chart, x="Count", y="Theme", color="Group", orientation='h', 
-                                title="Theme Distribution by Field", text_auto=True, 
-                                color_discrete_sequence=px.colors.qualitative.Pastel
-                            )
+                            fig = px.bar(df_chart, x="Count", y="Theme", color="Group", orientation='h', 
+                                         title="Consolidated Theme Distribution", text_auto=True,
+                                         color_discrete_sequence=px.colors.qualitative.Pastel)
                             fig.update_layout(barmode='stack', yaxis={'categoryorder':'total ascending'})
                             st.plotly_chart(fig, use_container_width=True)
-                        st.divider()
-
-                        st.markdown("### 🧩 Theme Details")
+                        
+                        # Kartlar
                         for t in themes:
-                            with st.expander(f"📌 {t['name']} ({t.get('total_count', 0)})", expanded=True):
-                                st.write(f"_{t.get('definition', '')}_")
-                                c1, c2 = st.columns(2)
-                                with c1:
-                                    st.markdown("**Top Sub-Themes:**")
-                                    for sub in t.get("sub_themes", []):
-                                        if isinstance(sub, dict):
-                                            st.markdown(f"• {sub.get('name')} ({sub.get('count')})")
-                                        else:
-                                            st.markdown(f"• {sub}")
-                                with c2:
-                                    st.markdown("**Key Quotes:**")
-                                    for q in t.get("quotes", []):
-                                        st.caption(f"🗣️ \"{q.get('text')}\" — *{q.get('group')}*")
+                            with st.expander(f"📌 {t['name']} (Total: {t.get('total_count')})"):
+                                st.write(f"_{t.get('definition')}_")
+                                st.markdown("**Sub-Themes:** " + ", ".join(t.get("sub_themes", [])))
+                                st.markdown("**Quotes:**")
+                                for q in t.get("quotes", []):
+                                    st.caption(f"🗣️ \"{q.get('text')}\" ({q.get('group')})")
 
                     # TAB 2
-                    with tab_breakdown:
-                        st.subheader("🔍 Breakdown by Field")
-                        # Tüm grupları topla
+                    with tab2:
+                        st.markdown("### 🔍 Field Breakdown")
                         all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
-                        
                         for group in all_groups:
                             with st.container():
-                                st.markdown(f"## 🎓 {group}")
-                                found = False
+                                st.markdown(f"**🎓 {group}**")
                                 for t in themes:
                                     cnt = t.get("group_distribution", {}).get(group, 0)
                                     if cnt > 0:
-                                        found = True
-                                        st.markdown(f"**{t['name']}** ({cnt})")
-                                        # İlerleme çubuğu
-                                        total = t.get('total_count', 1) or 1
-                                        st.progress(min(cnt / total, 1.0))
-                                
-                                if not found:
-                                    st.caption("No major themes recorded for this group.")
+                                        st.write(f"- {t['name']}: **{cnt}**")
                                 st.divider()
 
-                except json.JSONDecodeError:
-                    st.error("⚠️ Data Too Large or Complex for Single Pass.")
-                    st.error("The AI response was truncated. Please try reducing your dataset size manually or rely on the automated sampling.")
-                    with st.expander("See Raw Output (Truncated)"):
-                        st.text(cleaned_text)
                 except Exception as e:
-                    st.error(f"Processing Error: {e}")
+                    st.error(f"Final Merge Error: {e}")
+                    st.text(final_response.text) # Debug için
 
     except Exception as e:
-        st.error(f"File Error: {e}")
+        st.error(f"System Error: {e}")
 
 elif not api_key:
     st.info("👋 Enter API Key to start.")
