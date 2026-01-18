@@ -5,72 +5,89 @@ import json
 import plotly.express as px
 import re
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="InsightAI - Thematic Analysis", layout="wide", page_icon="📊")
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="InsightAI - Thematic Analysis", layout="wide", page_icon="🟣")
 
-# --- HEADER & TITLE ---
-col1, col2 = st.columns([1, 5])
-with col1:
-    # Placeholder for a logo if you have one, or an emoji
-    st.markdown("# 🟣") 
-with col2:
-    st.title("InsightAI")
-    st.markdown("Automated Thematic Analysis & Field Segmentation")
+# --- STİL (CSS) ---
+# Kart görünümleri ve başlıklar için ufak dokunuşlar
+st.markdown("""
+    <style>
+    .block-container {padding-top: 2rem;}
+    div[data-testid="stExpander"] div[role="button"] p {font-size: 1.1rem; font-weight: 600;}
+    </style>
+""", unsafe_allow_html=True)
 
-# --- 1. API KEY MANAGEMENT ---
+# --- 1. API ANAHTARI (SADECE BURASI SIDEBAR'DA KALDI) ---
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
     with st.sidebar:
         st.header("🔑 Authentication")
-        api_key = st.text_input("Enter Google Gemini API Key", type="password")
+        api_key = st.text_input("Gemini API Key", type="password")
 
-# --- 2. DATA UPLOAD & SETTINGS (SIDEBAR) ---
-with st.sidebar:
-    st.divider()
-    st.header("📂 Data Settings")
-    
-    separator = st.selectbox(
-        "CSV Separator", 
-        options=[";", ",", "\t"], 
-        index=0, 
-        help="Select ';' for Excel-exported CSVs (common in Europe/Turkey)."
-    )
-    
-    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
-    
-    st.info("Tip: Ensure your CSV has a text column and a grouping column (e.g., Major/Department).")
+# --- BAŞLIK ---
+st.title("🟣 InsightAI")
+st.markdown("### Automated Thematic Analysis & Field Segmentation")
+st.markdown("Upload your dataset below. The system will auto-detect the text and group columns.")
 
-# --- MAIN APP LOGIC ---
+# --- 2. MERKEZİ DOSYA YÜKLEME (KONFİGÜRASYON YOK) ---
+file_container = st.container()
+with file_container:
+    uploaded_file = st.file_uploader("", type=["csv"], help="Upload a standard CSV file.")
+
+# --- UYGULAMA MANTIĞI ---
 if uploaded_file and api_key:
     try:
-        # LOAD DATA
-        df = pd.read_csv(uploaded_file, sep=separator, engine='python', on_bad_lines='skip')
+        # OTOMATİK AYIRICI TESPİTİ VE OKUMA
+        # Pandas'ın python motoru genelde ayırıcıyı tahmin edebilir ama biz standart okuyalım
+        # Eğer veri düzgün okunmazsa, kullanıcı dosyasını ; veya , standardına getirmeli.
+        try:
+            df = pd.read_csv(uploaded_file, sep=None, engine='python', on_bad_lines='skip')
+        except:
+            df = pd.read_csv(uploaded_file, sep=";", engine='python', on_bad_lines='skip')
+
+        # --- 3. OTOMATİK SÜTUN TESPİTİ (AUTO-DETECT) ---
+        # Mantık: Ortalama karakter sayısı en yüksek olan sütun "Metin"dir.
+        # Benzersiz değer sayısı daha az olan (kategorik) sütun "Major"dur.
         
-        # PREVIEW
-        with st.expander("🔎 Preview Raw Data", expanded=False):
-            st.dataframe(df.head(3), use_container_width=True)
+        cols = df.columns
+        if len(cols) < 2:
+            st.error("Error: CSV must have at least 2 columns (Group and Text).")
+            st.stop()
+            
+        # Basit sezgisel tespit
+        text_column = None
+        major_column = None
+        
+        max_avg_len = 0
+        for col in cols:
+            # Sütun string tipindeyse ortalama uzunluğuna bak
+            if df[col].dtype == object or df[col].dtype == str:
+                avg_len = df[col].astype(str).str.len().mean()
+                if avg_len > max_avg_len:
+                    max_avg_len = avg_len
+                    text_column = col
+        
+        # Text column dışındaki ilk sütunu major kabul edelim (veya en az unique değere sahip olanı)
+        remaining_cols = [c for c in cols if c != text_column]
+        if remaining_cols:
+            major_column = remaining_cols[0] # Genelde ilk sütun ID veya Majordur.
+        else:
+            major_column = cols[0] # Fallback
 
-        # COLUMN SELECTION
-        st.divider()
-        st.subheader("⚙️ Configuration")
-        c1, c2 = st.columns(2)
-        with c1:
-            text_column = st.selectbox("Select Text Column (Feedback/Response)", df.columns)
-        with c2:
-            major_column = st.selectbox("Select Grouping Column (Major/Dept)", df.columns)
-
-        # START ANALYSIS BUTTON
+        st.info(f"✅ **Auto-Detected Structure:** Grouping by **'{major_column}'** | Analyzing Text from **'{text_column}'**")
+        
+        # ANALİZ BUTONU
         if st.button("🚀 Start AI Analysis", type="primary"):
             genai.configure(api_key=api_key)
-            # Using 1.5 Flash for speed and large context
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = genai.GenerativeModel('gemini-1.5-flash')
 
-            with st.spinner('InsightAI is processing your data, identifying themes, and generating visualizations...'):
+            with st.spinner('InsightAI is processing data, counting frequencies, and extracting quotes...'):
                 
-                # PREPARE DATA FOR AI
+                # VERİYİ HAZIRLA
                 data_input = []
+                # Token limitini korumak için max 1000 satır (opsiyonel, şu an hepsi)
                 for index, row in df.iterrows():
                     data_input.append({
                         "id": index,
@@ -78,34 +95,36 @@ if uploaded_file and api_key:
                         "text": str(row[text_column])
                     })
                 
-                # --- PROMPT ENGINEERING (ENGLISH ENFORCED) ---
+                # --- PROMPT GÜNCELLEMESİ (Sub-theme Counts) ---
                 prompt = f"""
                 You are InsightAI, an expert qualitative data analyst. 
-                Analyze the following dataset regardless of its original language.
+                Analyze the following dataset. 
 
-                **CRITICAL RULE:** ALL OUTPUT MUST BE IN ENGLISH. TRANSLATE IF NECESSARY.
+                **CRITICAL RULE:** ALL OUTPUT MUST BE IN ENGLISH.
 
                 TASKS:
-                1. **General Overview:** Write a professional summary paragraph (approx 100 words) capturing the main sentiment and trends.
-                2. **Thematic Coding:** Identify the main themes emerging from the participants' feedback.
-                3. **Sub-themes:** For each main theme, identify 2-4 sub-themes.
-                4. **Quantification:** Count how many times each theme is mentioned by each "Group" (Major/Department).
-                5. **Direct Quotes:** Select impactful direct quotes for each theme. Always label which "Group" the quote came from.
+                1. **General Overview:** Summary paragraph (approx 100 words).
+                2. **Thematic Coding:** Identify main themes.
+                3. **Sub-themes with Counts:** For each theme, identify sub-themes AND count how many comments fall into that sub-theme.
+                4. **Quantification:** Count theme mentions by "Group".
+                5. **Quotes:** Select impactful quotes per theme, labeled by "Group".
 
-                OUTPUT FORMAT (STRICT JSON ONLY):
+                OUTPUT FORMAT (STRICT JSON):
                 {{
-                    "overview": "A concise, high-level executive summary of the entire analysis in English...",
+                    "overview": "Executive summary string...",
                     "themes": [
                         {{
                             "id": 1,
-                            "name": "Theme Title (e.g., Curriculum Gaps)",
-                            "definition": "A short 1-sentence description of what this theme implies.",
-                            "total_count": 45,
-                            "sub_themes": ["Lack of practice", "Outdated books"],
-                            "group_distribution": {{"Computer Eng": 30, "Architecture": 15}},
+                            "name": "Main Theme Title",
+                            "definition": "Short definition.",
+                            "total_count": 50,
+                            "sub_themes": [
+                                {{"name": "Sub-theme A", "count": 30}},
+                                {{"name": "Sub-theme B", "count": 20}}
+                            ],
+                            "group_distribution": {{"Group A": 30, "Group B": 20}},
                             "quotes": [
-                                {{"text": "We need more labs...", "group": "Computer Eng"}},
-                                {{"text": "Design studios are short...", "group": "Architecture"}}
+                                {{"text": "Quote text...", "group": "Group A"}}
                             ]
                         }}
                     ]
@@ -116,132 +135,119 @@ if uploaded_file and api_key:
                 """
 
                 try:
-                    # API CALL
+                    # API ÇAĞRISI
                     response = model.generate_content(prompt)
                     
-                    # REGEX CLEANING
+                    # TEMİZLİK
                     match = re.search(r'\{.*\}', response.text, re.DOTALL)
                     cleaned_text = match.group(0) if match else response.text.replace("```json", "").replace("```", "").strip()
                     
-                    # JSON PARSING
                     result = json.loads(cleaned_text)
                     
-                    # --- DASHBOARD UI ---
                     st.success("Analysis Complete!")
                     
-                    # TABS FOR ORGANIZATION
-                    tab_overview, tab_breakdown = st.tabs(["📊 General Overview", "🎓 Field Comparison"])
+                    # --- SEKME YAPISI ---
+                    tab_overview, tab_breakdown = st.tabs(["📊 General Overview", "🎓 Detailed Field Breakdown"])
 
                     # ==================================================
-                    # TAB 1: GENERAL OVERVIEW
+                    # TAB 1: GENEL BAKIŞ
                     # ==================================================
                     with tab_overview:
-                        
-                        # 1. EXECUTIVE SUMMARY CARD
+                        # 1. ÖZET
                         st.markdown("### 📝 Executive Summary")
-                        st.info(result.get("overview", "No summary provided."))
-                        
+                        st.info(result.get("overview", "No summary."))
                         st.divider()
 
-                        # 2. STACKED BAR CHART (HORIZONTAL)
-                        st.markdown("### 📉 Dominant Themes")
-                        
+                        # 2. GRAFİK (YATAY STACKED)
+                        st.markdown("### 📉 Dominant Themes Landscape")
                         themes = result.get("themes", [])
                         chart_data = []
-                        
                         for t in themes:
                             for grp, count in t.get("group_distribution", {}).items():
-                                chart_data.append({
-                                    "Theme": t["name"],
-                                    "Group": grp,
-                                    "Count": count
-                                })
+                                chart_data.append({"Theme": t["name"], "Group": grp, "Count": count})
                         
                         if chart_data:
                             df_chart = pd.DataFrame(chart_data)
-                            # Horizontal Stacked Bar Chart
                             fig = px.bar(
-                                df_chart, 
-                                x="Count", 
-                                y="Theme", 
-                                color="Group", 
-                                orientation='h', # Horizontal
-                                title="Distribution of Themes by Field",
-                                text_auto=True,
+                                df_chart, x="Count", y="Theme", color="Group", orientation='h', 
+                                title="Theme Distribution by Field", text_auto=True, 
                                 color_discrete_sequence=px.colors.qualitative.Pastel
                             )
                             fig.update_layout(barmode='stack', yaxis={'categoryorder':'total ascending'})
                             st.plotly_chart(fig, use_container_width=True)
-
                         st.divider()
 
-                        # 3. DETAILED THEME CARDS
-                        st.markdown("### 🧩 Theme Details & Sub-breakdowns")
-                        
+                        # 3. TEMA KARTLARI (SUB-THEME COUNTS İLE)
+                        st.markdown("### 🧩 Theme Analysis")
                         for t in themes:
-                            # Creating a "Card" look using container and border (if supported) or expander
-                            with st.expander(f"📌 {t['name']} (Total Mentions: {t['total_count']})", expanded=True):
-                                st.markdown(f"*{t.get('definition', '')}*")
-                                
-                                c_sub, c_quotes = st.columns([1, 2])
-                                
-                                with c_sub:
-                                    st.markdown("**Sub-Themes:**")
+                            with st.expander(f"📌 {t['name']} (Total: {t['total_count']})", expanded=True):
+                                st.write(f"_{t.get('definition', '')}_")
+                                c1, c2 = st.columns([1, 1])
+                                with c1:
+                                    st.markdown("**Sub-Themes & Frequencies:**")
+                                    # Alt temaları ve sayılarını yazdır
                                     for sub in t.get("sub_themes", []):
-                                        st.markdown(f"• {sub}")
-                                
-                                with c_quotes:
+                                        # Eğer API string döndürdüyse (eski format koruması)
+                                        if isinstance(sub, str):
+                                            st.markdown(f"• {sub}")
+                                        else:
+                                            # Yeni format: Obje {name, count}
+                                            st.markdown(f"• **{sub['name']}** ({sub['count']} mentions)")
+                                with c2:
                                     st.markdown("**Key Voices:**")
                                     for q in t.get("quotes", []):
-                                        st.markdown(f"> \"{q['text']}\"")
-                                        st.caption(f"— {q['group']}")
+                                        st.caption(f"🗣️ \"{q['text']}\" — *{q['group']}*")
 
                     # ==================================================
-                    # TAB 2: FIELD COMPARISON
+                    # TAB 2: DETAYLI BÖLÜM ANALİZİ (DROP-DOWN YOK)
                     # ==================================================
                     with tab_breakdown:
-                        st.subheader("🔍 Filter by Field (Major)")
+                        st.subheader("🔍 Full Breakdown by Field")
+                        st.markdown("Below is the detailed thematic distribution for every field found in the dataset.")
                         
-                        # Get unique groups
-                        all_groups = set()
-                        for t in themes:
-                            all_groups.update(t.get("group_distribution", {}).keys())
+                        # Tüm unique grupları bul
+                        all_groups = sorted(list(set(g for t in themes for g in t.get("group_distribution", {}).keys())))
                         
-                        selected_group = st.selectbox("Select a Field to Deep Dive:", list(all_groups))
-
-                        if selected_group:
-                            st.markdown(f"### Results for: **{selected_group}**")
-                            
-                            found_data = False
-                            for t in themes:
-                                count = t.get("group_distribution", {}).get(selected_group, 0)
-                                if count > 0:
-                                    found_data = True
-                                    with st.container():
-                                        st.markdown(f"#### {t['name']}")
-                                        st.progress(count / t['total_count'] if t['total_count'] > 0 else 0)
-                                        st.write(f"Frequency in this field: **{count}**")
+                        for group in all_groups:
+                            # Her bölüm için bir kapsayıcı
+                            with st.container():
+                                st.markdown(f"## 🎓 {group}")
+                                
+                                has_data = False
+                                for t in themes:
+                                    count = t.get("group_distribution", {}).get(group, 0)
+                                    if count > 0:
+                                        has_data = True
+                                        # Temayı ve o bölümdeki yoğunluğunu göster
+                                        st.markdown(f"**{t['name']}** (Frequency: {count})")
                                         
-                                        # Filter quotes for this specific group
-                                        group_quotes = [q['text'] for q in t.get("quotes", []) if q.get("group") == selected_group]
+                                        # İlerleme çubuğu (O temanın toplamına göre bu bölümün payı)
+                                        ratio = count / t['total_count']
+                                        st.progress(ratio)
                                         
+                                        # Sadece bu gruba ait alıntıları çek
+                                        group_quotes = [q['text'] for q in t.get("quotes", []) if q.get("group") == group]
                                         if group_quotes:
                                             for gq in group_quotes:
                                                 st.info(f"🗣️ \"{gq}\"")
-                                        st.divider()
+                                        else:
+                                            st.caption("*No direct quotes selected for this specific theme/group.*")
+                                        
+                                        st.markdown("---")
+                                
+                                if not has_data:
+                                    st.warning(f"No significant themes detected for {group}.")
                             
-                            if not found_data:
-                                st.warning(f"No specific data points found for {selected_group}.")
+                            # Gruplar arası büyük boşluk
+                            st.write("##") 
 
                 except Exception as e:
-                    st.error(f"An error occurred during processing: {e}")
-                    st.markdown("Check if the API Key is valid or if the data size is too large.")
+                    st.error(f"AI Processing Error: {e}")
 
     except Exception as e:
-        st.error("Error reading the file.")
-        st.warning("Try changing the 'CSV Separator' in the sidebar.")
-        st.error(f"Details: {e}")
+        st.error("Error reading file. Please ensure it is a standard CSV/Excel export.")
+        st.error(str(e))
 
 elif not api_key:
-    st.info("👋 Welcome to InsightAI. Please enter your API Key in the sidebar to begin.")
-
+    # Boş durum (Başlangıç ekranı)
+    st.info("👋 Please enter your API Key in the sidebar to start.")
