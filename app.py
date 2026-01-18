@@ -75,7 +75,7 @@ if uploaded_file and api_key:
             }
 
             model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash",
+                model_name="gemini-2.5-flash",
                 generation_config=generation_config
             )
 
@@ -235,3 +235,4 @@ if uploaded_file and api_key:
 
 elif not api_key:
     st.info("👋 Please enter your API Key in the sidebar to start.")
+
